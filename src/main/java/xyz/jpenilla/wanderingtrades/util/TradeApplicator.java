@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 import org.bukkit.entity.AbstractVillager;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.WanderingTrader;
 import org.bukkit.inventory.MerchantRecipe;
 import org.bukkit.persistence.PersistentDataContainer;
@@ -57,29 +58,31 @@ public final class TradeApplicator {
     }
 
     private void addTrades(final WanderingTrader wanderingTrader, final boolean refresh) {
-        this.selectTrades(newTrades -> this.addSelectedTrades(wanderingTrader, refresh, newTrades));
+        this.selectTrades(wanderingTrader, newTrades -> this.addSelectedTrades(wanderingTrader, refresh, newTrades));
     }
 
-    public void selectTrades(final Consumer<List<MerchantRecipe>> mainThreadCallback) {
-        this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-            final List<MerchantRecipe> newTrades = this.selectTrades();
+    public void selectTrades(final Consumer<List<MerchantRecipe>> callback) {
+        this.selectTrades(null, callback);
+    }
 
-            this.plugin.getServer().getScheduler().runTask(
-                this.plugin,
-                () -> mainThreadCallback.accept(newTrades)
-            );
-        });
+    /** Selects from immutable config snapshots on the owning region, then invokes the callback there. */
+    public void selectTrades(final @Nullable Entity target, final Consumer<List<MerchantRecipe>> callback) {
+        final Runnable select = () -> callback.accept(this.selectTrades());
+        if (target != null) {
+            this.plugin.scheduler().runAtEntity(target, select);
+        } else {
+            this.plugin.scheduler().runGlobal(select);
+        }
     }
 
     private List<MerchantRecipe> selectTrades() {
         final List<MerchantRecipe> newTrades = new ArrayList<>();
-
-        if (this.plugin.configManager().playerHeadConfig().playerHeadsFromServer() && randBoolean(this.plugin.configManager().playerHeadConfig().playerHeadsFromServerChance())) {
+        if (this.plugin.configManager().playerHeadConfig().playerHeadsFromServer()
+            && randBoolean(this.plugin.configManager().playerHeadConfig().playerHeadsFromServerChance())) {
             newTrades.addAll(this.plugin.playerHeads().randomlySelectPlayerHeads());
         }
 
         final Map<String, TradeConfig> tradeConfigs = Map.copyOf(this.plugin.configManager().tradeConfigs());
-
         if (this.plugin.config().allowMultipleSets()) {
             for (final TradeConfig config : tradeConfigs.values()) {
                 if (randBoolean(config.chance())) {
@@ -94,15 +97,10 @@ public final class TradeApplicator {
                 newTrades.addAll(tradeConfigs.get(chosenConfig).getTrades(false));
             }
         }
-
         return newTrades;
     }
 
-    private void addSelectedTrades(
-        final WanderingTrader wanderingTrader,
-        final boolean refresh,
-        final List<MerchantRecipe> newTrades
-    ) {
+    private void addSelectedTrades(final WanderingTrader wanderingTrader, final boolean refresh, final List<MerchantRecipe> newTrades) {
         if (!wanderingTrader.isValid()) {
             return;
         }

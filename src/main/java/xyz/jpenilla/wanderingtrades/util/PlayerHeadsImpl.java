@@ -17,8 +17,8 @@ import org.bukkit.OfflinePlayer;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.MerchantRecipe;
+import xyz.jpenilla.wanderingtrades.util.ServerScheduler.TaskHandle;
 import org.bukkit.inventory.meta.SkullMeta;
-import org.bukkit.scheduler.BukkitTask;
 import org.jspecify.annotations.NullMarked;
 import org.jspecify.annotations.Nullable;
 import xyz.jpenilla.pluginbase.legacy.TextUtil;
@@ -31,12 +31,12 @@ final class PlayerHeadsImpl implements PlayerHeads {
     private final Map<UUID, MerchantRecipe> recipes = new ConcurrentHashMap<>();
     private final Map<UUID, Long> offlineLastSeen = new ConcurrentHashMap<>();
     private final ProfileCompleter profileCompleter;
-    private @Nullable BukkitTask cleanupTask;
+    private @Nullable TaskHandle cleanupTask;
 
     PlayerHeadsImpl(final WanderingTrades plugin) {
         this.plugin = plugin;
         this.profileCompleter = new ProfileCompleter(plugin);
-        this.profileCompleter.runTaskTimerAsynchronously(plugin, 0L, 20L * 2L);
+        this.plugin.scheduler().runAsyncTimer(this.profileCompleter, 0L, 20L * 2L);
         this.load();
         this.scheduleCleanup();
     }
@@ -45,8 +45,7 @@ final class PlayerHeadsImpl implements PlayerHeads {
         if (this.cleanupTask != null) {
             this.cleanupTask.cancel();
         }
-        this.cleanupTask = this.plugin.getServer().getScheduler().runTaskTimer(
-            this.plugin,
+        this.cleanupTask = this.plugin.scheduler().runGlobalTimer(
             this::removeExpired,
             20L * 60L * 10L,
             20L * 60L * 10L
@@ -67,7 +66,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
             final MerchantRecipe recipe = recipes.get(uuid);
             final PlayerProfile profile = ((SkullMeta) recipe.getResult().getItemMeta()).getPlayerProfile();
             if (profile == null || !profile.hasTextures()) {
-                // Profile is not yet complete
                 continue;
             }
             selectedRecipes.add(recipe);
@@ -80,7 +78,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
         if (!this.plugin.configManager().playerHeadConfig().playerHeadsFromServer()) {
             return;
         }
-
         this.offlineLastSeen.remove(player.getUniqueId());
         this.addHead(player);
     }
@@ -90,9 +87,7 @@ final class PlayerHeadsImpl implements PlayerHeads {
         if (!this.plugin.configManager().playerHeadConfig().playerHeadsFromServer()) {
             return;
         }
-
         this.offlineLastSeen.put(player.getUniqueId(), System.currentTimeMillis());
-
         if (this.plugin.vaultHook() != null && this.plugin.configManager().playerHeadConfig().permissionWhitelist()) {
             if (!player.hasPermission(Constants.Permissions.WANDERINGTRADES_HEADAVAILABLE)) {
                 this.recipes.remove(player.getUniqueId());
@@ -117,11 +112,9 @@ final class PlayerHeadsImpl implements PlayerHeads {
             .miniMessageContext()
             .lore(playerHeadConfig.lore());
         if (playerHeadConfig.name() != null) {
-            headBuilder = headBuilder
-                .customName(playerHeadConfig.name().replace("{PLAYER}", name));
+            headBuilder = headBuilder.customName(playerHeadConfig.name().replace("{PLAYER}", name));
         }
         final ItemStack head = headBuilder.exitAndBuild();
-
         final MerchantRecipe recipe = new MerchantRecipe(
             head,
             0,
@@ -138,7 +131,7 @@ final class PlayerHeadsImpl implements PlayerHeads {
             final PlayerProfile profile = meta.getPlayerProfile();
             if (profile != null && !profile.hasTextures()) {
                 this.profileCompleter.submitProfile(profile, updatedProfile -> {
-                    this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+                    this.plugin.scheduler().runGlobal(() -> {
                         meta.setPlayerProfile(this.filterProfileProperties(updatedProfile));
                         head.setItemMeta(meta);
                     });
@@ -148,7 +141,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
                 head.setItemMeta(meta);
             }
         }
-
         return recipe;
     }
 
@@ -157,7 +149,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
         newProfile.clearProperties();
         for (final ProfileProperty property : profile.getProperties()) {
             if (property.getName().equals("textures")) {
-                // Only copy the textures, and without the signature
                 newProfile.setProperty(new ProfileProperty("textures", property.getValue()));
             }
         }
@@ -187,7 +178,8 @@ final class PlayerHeadsImpl implements PlayerHeads {
             return;
         }
         for (final UUID uuid : Set.copyOf(this.offlineLastSeen.keySet())) {
-            if (!this.playedRecentlyEnough(this.offlineLastSeen.get(uuid))) {
+            final Long lastSeen = this.offlineLastSeen.get(uuid);
+            if (lastSeen != null && !this.playedRecentlyEnough(lastSeen)) {
                 this.offlineLastSeen.remove(uuid);
                 this.recipes.remove(uuid);
             }
@@ -199,7 +191,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
         if (username == null || username.isBlank()) {
             return;
         }
-
         if (player instanceof Player onlinePlayer && onlinePlayer.isConnected()) {
             this.addHead(onlinePlayer);
         } else {
@@ -216,9 +207,9 @@ final class PlayerHeadsImpl implements PlayerHeads {
             return;
         }
         if (this.plugin.isVaultPermissions() && this.plugin.configManager().playerHeadConfig().permissionWhitelist()) {
-            this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
+            this.plugin.scheduler().runAsync(() -> {
                 if (this.plugin.vaultHook().permissions().playerHas(null, offlinePlayer, Constants.Permissions.WANDERINGTRADES_HEADAVAILABLE)) {
-                    this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
+                    this.plugin.scheduler().runGlobal(() -> {
                         this.recipes.put(offlinePlayer.getUniqueId(), this.getHeadRecipe(offlinePlayer, username));
                         this.offlineLastSeen.put(offlinePlayer.getUniqueId(), lastSeen);
                     });
@@ -245,7 +236,6 @@ final class PlayerHeadsImpl implements PlayerHeads {
 
     private boolean isUsernameBlacklisted(final String username) {
         if (username.startsWith("*")) {
-            // Don't even try to do anything for Geyser/Bedrock users
             return true;
         }
         return TextUtil.containsCaseInsensitive(username, this.plugin.configManager().playerHeadConfig().usernameBlacklist());
@@ -256,11 +246,8 @@ final class PlayerHeadsImpl implements PlayerHeads {
         if (playerHeadConfig.days() == -1) {
             return true;
         }
-        final LocalDateTime logout = Instant.ofEpochMilli(lastPlayed)
-            .atZone(ZoneId.systemDefault())
-            .toLocalDateTime();
-        final LocalDateTime cutoff = LocalDateTime.now()
-            .minusDays(playerHeadConfig.days());
+        final LocalDateTime logout = Instant.ofEpochMilli(lastPlayed).atZone(ZoneId.systemDefault()).toLocalDateTime();
+        final LocalDateTime cutoff = LocalDateTime.now().minusDays(playerHeadConfig.days());
         return logout.isAfter(cutoff);
     }
 }

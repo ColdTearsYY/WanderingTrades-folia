@@ -4,7 +4,6 @@ import org.bstats.bukkit.Metrics;
 import org.bstats.charts.SimplePie;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
-import org.bukkit.inventory.InventoryView;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.checkerframework.checker.nullness.qual.MonotonicNonNull;
 import org.incendo.interfaces.core.view.InterfaceView;
@@ -18,6 +17,7 @@ import xyz.jpenilla.wanderingtrades.integration.VaultHook;
 import xyz.jpenilla.wanderingtrades.integration.WorldGuardHook;
 import xyz.jpenilla.wanderingtrades.util.Listeners;
 import xyz.jpenilla.wanderingtrades.util.PlayerHeads;
+import xyz.jpenilla.wanderingtrades.util.ServerScheduler;
 import xyz.jpenilla.wanderingtrades.util.TradeApplicator;
 import xyz.jpenilla.wanderingtrades.util.UpdateChecker;
 
@@ -26,6 +26,7 @@ public final class WanderingTrades extends JavaPlugin {
     private static @MonotonicNonNull WanderingTrades instance;
 
     private @MonotonicNonNull ConfigManager configManager;
+    private @MonotonicNonNull ServerScheduler scheduler;
     private @MonotonicNonNull PlayerHeads playerHeads;
     private @MonotonicNonNull Listeners listeners;
     private @MonotonicNonNull TradeApplicator tradeApplicator;
@@ -36,6 +37,7 @@ public final class WanderingTrades extends JavaPlugin {
     @Override
     public void onEnable() {
         instance = this;
+        this.scheduler = new ServerScheduler(this);
         PaperInterfaceListeners.install(this);
         this.setupIntegrations();
         this.configManager = new ConfigManager(this);
@@ -54,10 +56,13 @@ public final class WanderingTrades extends JavaPlugin {
     @Override
     public void onDisable() {
         this.closeInterfaces();
+        if (this.scheduler != null) {
+            this.scheduler.cancelAll();
+        }
     }
 
     private void setupIntegrations() {
-        this.getServer().getScheduler().runTask(this, () -> {
+        this.scheduler.runGlobal(() -> {
             if (this.getServer().getPluginManager().isPluginEnabled("Vault")) {
                 this.vault = new VaultHook(this.getServer());
             }
@@ -70,10 +75,7 @@ public final class WanderingTrades extends JavaPlugin {
 
     private void updateCheck() {
         if (this.config().updateChecker()) {
-            this.getServer().getScheduler().runTask(
-                this,
-                () -> new UpdateChecker(this, "jpenilla/WanderingTrades").checkVersion()
-            );
+            this.scheduler.runAsync(() -> new UpdateChecker(this, "jpenilla/WanderingTrades").checkVersion());
         }
     }
 
@@ -87,25 +89,28 @@ public final class WanderingTrades extends JavaPlugin {
 
     public void reload() {
         this.closeInterfaces();
-
         this.configManager().reload();
-
         this.listeners().reload();
         this.playerHeads().configChanged();
     }
 
     private void closeInterfaces() {
         for (final Player player : this.getServer().getOnlinePlayers()) {
-            try {
-                final Object openInventoryView = Player.class.getMethod("getOpenInventory").invoke(player);
-                final Inventory inv = (Inventory) InventoryView.class.getMethod("getTopInventory").invoke(openInventoryView);
-                if (inv.getHolder() instanceof InterfaceView<?, ?>) {
-                    player.closeInventory();
+            this.scheduler.runAtEntity(player, () -> {
+                try {
+                    final Inventory inv = player.getOpenInventory().getTopInventory();
+                    if (inv.getHolder() instanceof InterfaceView<?, ?>) {
+                        player.closeInventory();
+                    }
+                } catch (final RuntimeException exception) {
+                    this.getLogger().fine("Unable to close interface for " + player.getName() + ": " + exception.getMessage());
                 }
-            } catch (final ReflectiveOperationException e) {
-                throw new RuntimeException(e);
-            }
+            });
         }
+    }
+
+    public ServerScheduler scheduler() {
+        return this.scheduler;
     }
 
     public ConfigManager configManager() {

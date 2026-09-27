@@ -98,6 +98,7 @@ indra {
 paperPluginYaml {
     main = "xyz.jpenilla.wanderingtrades.WanderingTrades"
     apiVersion = "1.21.4"
+    foliaSupported.set(true)
     website = "https://github.com/jpenilla/WanderingTrades"
     authors = listOf("jmp")
 
@@ -125,6 +126,7 @@ bukkitPluginYaml {
     main = "wanderingtrades.io.papermc.papertrail.RequiresPaperPlugins"
     apiVersion = "1.21.4"
     authors = listOf("jmp")
+    foliaSupported.set(true)
 }
 
 publishMods.modrinth {

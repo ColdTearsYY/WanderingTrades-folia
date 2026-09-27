@@ -24,6 +24,7 @@ import org.jspecify.annotations.Nullable;
 import xyz.jpenilla.wanderingtrades.WanderingTrades;
 import xyz.jpenilla.wanderingtrades.command.BaseCommand;
 import xyz.jpenilla.wanderingtrades.command.Commands;
+import xyz.jpenilla.wanderingtrades.config.Messages;
 import xyz.jpenilla.wanderingtrades.config.TradeConfig;
 import xyz.jpenilla.wanderingtrades.util.Constants;
 
@@ -49,12 +50,8 @@ public final class TradeCommands extends BaseCommand {
 
     @Override
     public void register() {
-        final Command.Builder<Source> trade = this.commandManager
-            .commandBuilder("wt")
-            .literal("trade");
-
-        final Command.Builder<Source> config = trade
-            .literal("config")
+        final Command.Builder<Source> trade = this.commandManager.commandBuilder("wt").literal("trade");
+        final Command.Builder<Source> config = trade.literal("config")
             .required("config", tradeConfigParser())
             .permission("wanderingtrades.tradecommand")
             .handler(this::tradeConfig);
@@ -65,8 +62,7 @@ public final class TradeCommands extends BaseCommand {
             .flag(this.tradeSessionFlag())
             .flag(this.sessionLifetimeFlag()));
 
-        final Command.Builder<Source> natural = trade
-            .literal("natural")
+        final Command.Builder<Source> natural = trade.literal("natural")
             .permission("wanderingtrades.tradenaturalcommand")
             .handler(this::tradeNatural);
         this.commandManager.command(natural);
@@ -77,7 +73,7 @@ public final class TradeCommands extends BaseCommand {
             .flag(this.sessionLifetimeFlag()));
     }
 
-    private static final long DEFAULT_SESSION_LIFETIME = 20L * 60L * 60L; // 1 hour
+    private static final long DEFAULT_SESSION_LIFETIME = 20L * 60L * 60L;
 
     private void tradeConfig(final CommandContext<Source> ctx) {
         final @Nullable String sessionId = ctx.flags().<String>getValue("session").orElse(null);
@@ -102,32 +98,38 @@ public final class TradeCommands extends BaseCommand {
         final long sessionLifetime,
         final Supplier<CompletableFuture<Merchant>> merchantSupplier
     ) {
-        final CompletableFuture<Merchant> future;
-        if (sessionId != null) {
-            future = this.plugin.sessionManager().getOrCreateSession(sessionId, sessionLifetime, merchantSupplier);
-        } else {
-            future = merchantSupplier.get();
-        }
-        future.thenAccept(merchant -> player.openMerchant(merchant, false));
+        final CompletableFuture<Merchant> future = sessionId == null
+            ? merchantSupplier.get()
+            : this.plugin.sessionManager().getOrCreateSession(sessionId, sessionLifetime, merchantSupplier);
+        future.thenAccept(merchant -> this.plugin.scheduler().runAtEntity(
+            player,
+            () -> player.openMerchant(merchant, false),
+            () -> this.plugin.debug("Trade session target left before the merchant could open")
+        )).exceptionally(error -> {
+            this.plugin.scheduler().runAtEntity(player, () -> player.sendMessage(Messages.COMMAND_EXCEPTION_MALFORMED_CONFIG));
+            return null;
+        });
     }
 
     private Supplier<CompletableFuture<Merchant>> tradeConfig(final Player player, final TradeConfig config) {
         return () -> {
             final CompletableFuture<Merchant> future = new CompletableFuture<>();
-
-            this.plugin.getServer().getScheduler().runTaskAsynchronously(this.plugin, () -> {
-                final @Nullable List<MerchantRecipe> merchantRecipes = config.tryGetTrades(player);
-                if (merchantRecipes == null) {
+            this.plugin.scheduler().runAsync(() -> {
+                final List<MerchantRecipe> merchantRecipes;
+                try {
+                    merchantRecipes = config.getTrades(true);
+                } catch (final IllegalStateException exception) {
+                    future.completeExceptionally(exception);
                     return;
                 }
-
-                this.plugin.getServer().getScheduler().runTask(this.plugin, () -> {
-                    final Merchant merchant = this.plugin.getServer().createMerchant(miniMessage().deserialize(config.customName()));
+                this.plugin.scheduler().runAtEntity(player, () -> {
+                    final Merchant merchant = this.plugin.getServer().createMerchant(
+                        miniMessage().deserialize(config.customName())
+                    );
                     merchant.setRecipes(merchantRecipes);
                     future.complete(merchant);
-                });
+                }, () -> future.completeExceptionally(new IllegalStateException("Player left before trade creation")));
             });
-
             return future;
         };
     }
@@ -135,26 +137,32 @@ public final class TradeCommands extends BaseCommand {
     private Supplier<CompletableFuture<Merchant>> tradeNatural(final Player player) {
         return () -> {
             final CompletableFuture<Merchant> future = new CompletableFuture<>();
-
-            final List<MerchantRecipe> recipes = new ArrayList<>();
-            final WanderingTrader wanderingTrader = player.getWorld().spawn(player.getLocation(), WanderingTrader.class, trader -> {
-                trader.getPersistentDataContainer().set(Constants.TEMPORARY_BLACKLISTED, PersistentDataType.BYTE, (byte) 1);
-                trader.setInvisible(true);
-                trader.setInvulnerable(true);
-                trader.setCollidable(false);
-                trader.setAI(false);
-                trader.setGravity(false);
-                recipes.addAll(trader.getRecipes());
-            });
-            wanderingTrader.remove();
-            this.plugin.tradeApplicator().selectTrades(trades -> {
-                final Merchant merchant = this.plugin.getServer().createMerchant(Component.translatable("entity.minecraft.wandering_trader"));
-                final List<MerchantRecipe> result = new ArrayList<>(trades);
-                result.addAll(recipes);
-                merchant.setRecipes(result);
-                future.complete(merchant);
-            });
-
+            this.plugin.scheduler().runAtEntity(player, () -> {
+                final List<MerchantRecipe> recipes = new ArrayList<>();
+                final WanderingTrader wanderingTrader = player.getWorld().spawn(
+                    player.getLocation(),
+                    WanderingTrader.class,
+                    trader -> {
+                        trader.getPersistentDataContainer().set(Constants.TEMPORARY_BLACKLISTED, PersistentDataType.BYTE, (byte) 1);
+                        trader.setInvisible(true);
+                        trader.setInvulnerable(true);
+                        trader.setCollidable(false);
+                        trader.setAI(false);
+                        trader.setGravity(false);
+                        recipes.addAll(trader.getRecipes());
+                    }
+                );
+                wanderingTrader.remove();
+                this.plugin.tradeApplicator().selectTrades(player, trades -> {
+                    final Merchant merchant = this.plugin.getServer().createMerchant(
+                        Component.translatable("entity.minecraft.wandering_trader")
+                    );
+                    final List<MerchantRecipe> result = new ArrayList<>(trades);
+                    result.addAll(recipes);
+                    merchant.setRecipes(result);
+                    future.complete(merchant);
+                });
+            }, () -> future.completeExceptionally(new IllegalStateException("Player left before natural trade creation")));
             return future;
         };
     }
